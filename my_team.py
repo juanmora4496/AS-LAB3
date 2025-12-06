@@ -33,40 +33,38 @@ class SmartAgent(CaptureAgent):
         self.mode = 'ATTACK'
         self.patrol_points = []
         
-        # Tracking Variables
         self.legal_positions = []
-        self.beliefs = {}  # Dictionary to store beliefs for each opponent
+        self.beliefs = {}
 
     def register_initial_state(self, game_state):
         self.start = game_state.get_agent_position(self.index)
         CaptureAgent.register_initial_state(self, game_state)
         
-        # 1. Map Analysis
         self.legal_positions = [p for p in game_state.get_walls().as_list(False)]
-        self.distancer.get_maze_distances() # Pre-compute distances
+        self.distancer.get_maze_distances()
         
-        # 2. Initialize Particle Filter for Opponents
+        # Initialize the particle filter to track enemies
         self.opponents = self.get_opponents(game_state)
         for opp in self.opponents:
             self.beliefs[opp] = util.Counter()
             for p in self.legal_positions:
                 self.beliefs[opp][p] = 1.0 / len(self.legal_positions)
 
-        # 3. Calculate Chokepoints (Better Patrol)
+        # Identify chokepoints to improve our patrol patterns
         self.calculate_chokepoints(game_state)
 
-        # 4. Zone Assignment (Zone Defense)
+        # Establish patrol zones (Top/Bottom)
         team_indices = self.get_team(game_state)
         team_indices.sort()
-        self.patrol_points.sort(key=lambda p: p[1]) # Sort by Y
+        self.patrol_points.sort(key=lambda p: p[1])
         split = len(self.patrol_points) // 2
         
-        if self.index == team_indices[0]: # First agent takes Bottom
+        if self.index == team_indices[0]:
             self.my_patrol_points = self.patrol_points[:split]
-        else: # Second agent takes Top
+        else:
             self.my_patrol_points = self.patrol_points[split:]
             
-        if not self.my_patrol_points: # Fallback
+        if not self.my_patrol_points:
             self.my_patrol_points = self.patrol_points
 
     def calculate_chokepoints(self, game_state):
@@ -84,7 +82,7 @@ class SmartAgent(CaptureAgent):
             if not game_state.has_wall(boundary_x, y):
                 self.patrol_points.append((boundary_x, y))
         
-        # Refinement: Prioritize tunnels
+        # Filter for tunnels if we have too many points
         if len(self.patrol_points) > 4:
             tunnels = []
             for x, y in self.patrol_points:
@@ -106,14 +104,14 @@ class SmartAgent(CaptureAgent):
         for opp in self.opponents:
             new_belief = util.Counter()
             
-            # CASE 1: Exact Observation
+            # If we can see the enemy, update belief to exact position
             opp_pos = game_state.get_agent_position(opp)
             if opp_pos is not None:
                 new_belief[opp_pos] = 1.0
                 self.beliefs[opp] = new_belief
                 continue
 
-            # CASE 2: Movement (Transition Model)
+            # Transition Model: enemies move
             for p in self.legal_positions:
                 if self.beliefs[opp][p] > 0:
                     x, y = p
@@ -124,12 +122,12 @@ class SmartAgent(CaptureAgent):
                     for next_pos in valid_moves:
                         new_belief[next_pos] += prob
             
-            # CASE 3: Noisy Distance (Sensor Model)
+            # Sensor Model: noisy distance reading
             observed_dist = noisy_distances[opp]
             for p in self.legal_positions:
                 true_dist = util.manhattan_distance(my_pos, p)
                 
-                # Defend Optimization: Prune impossible sides
+                # If we're defending, we can rule out positions on the wrong side
                 if self.mode == 'DEFEND':
                     if self.red and p[0] > (game_state.data.layout.width // 2):
                         new_belief[p] = 0
@@ -141,7 +139,6 @@ class SmartAgent(CaptureAgent):
                 prob_obs = game_state.get_distance_prob(true_dist, observed_dist)
                 new_belief[p] *= prob_obs
 
-                # Zero out visible tiles if not seen
                 if util.manhattan_distance(my_pos, p) <= 5:
                     new_belief[p] = 0
 
@@ -177,7 +174,7 @@ class SmartAgent(CaptureAgent):
     def choose_action(self, game_state):
         self.update_beliefs(game_state)
         
-        # 1. Update Global State Info
+        # Update game state info
         current_lead = self.get_score(game_state)
         team_indices = self.get_team(game_state)
         
@@ -185,7 +182,7 @@ class SmartAgent(CaptureAgent):
         teammate_index = [i for i in team_indices if i != self.index][0]
         teammate_pos = game_state.get_agent_position(teammate_index)
         
-        # 2. Dynamic Role Allocation
+        # Decide who attacks and who defends
         food_list = self.get_food(game_state).as_list()
         
         if len(food_list) > 0:
@@ -203,8 +200,8 @@ class SmartAgent(CaptureAgent):
         elif my_dist_to_food == teammate_dist_to_food and self.index == team_indices[0]:
             is_attacker = True
 
-        # 3. Mode Selection
-        # Smart Endgame: If we can secure a win by returning, do it.
+        # Choose a high-level strategy
+        # Return flag if we can win or are carrying a lot
         food_carried = game_state.get_agent_state(self.index).num_carrying
         if (current_lead + food_carried) > 7 or food_carried > 0:
              self.mode = 'RETREAT'
@@ -223,7 +220,7 @@ class SmartAgent(CaptureAgent):
         else:
             self.mode = 'DEFEND'
 
-        # 3.1 Ultra Attacking Mode 
+        # Ultra Attacking Mode, if losing and time is running out 
         if current_lead < 0 and game_state.data.timeleft < 200:
             ghost_nearby = any([self.get_maze_distance(my_pos, self.get_most_likely_position(o)) < 5 for o in self.opponents])
             
@@ -234,7 +231,6 @@ class SmartAgent(CaptureAgent):
             else:
                 self.mode = 'ULTRA_ATTACK'
 
-        # 4. Execution
         actions = game_state.get_legal_actions(self.index)
         if len(actions) > 1 and Directions.STOP in actions:
             actions.remove(Directions.STOP)
@@ -257,7 +253,7 @@ class SmartAgent(CaptureAgent):
         my_pos = my_state.get_position()
         current_capsules = self.get_capsules(game_state)
 
-        # --- ENEMY DETECTION (INFERRED) ---
+        # Infer enemy positions
         enemies_indices = self.get_opponents(successor)
         active_ghosts_pos = []
         invaders_pos = []
@@ -275,15 +271,15 @@ class SmartAgent(CaptureAgent):
 
         # --- ATTACK / ULTRA_ATTACK MODE ---
         if self.mode == 'ATTACK' or self.mode == 'ULTRA_ATTACK':
-            features['successor_score'] = 0 # Default
+            features['successor_score'] = 0
 
             if self.mode == 'ULTRA_ATTACK':
-                # Coordination: Split map into Top/Bottom
+                # Split the map so we don't step on each other's toes
                 food_list = self.get_food(successor).as_list()
                 
-                # Determine my role (Top or Bottom)
+                # Top/Bottom split based on agent index
                 team_indices = self.get_team(game_state)
-                team_indices.sort() # Ensure consistent ordering
+                team_indices.sort()
                 is_bottom = (self.index == team_indices[0])
                 
                 mid_y = game_state.data.layout.height // 2
@@ -294,13 +290,13 @@ class SmartAgent(CaptureAgent):
                 else:
                     my_food = [f for f in food_list if f[1] >= mid_y]
                     
-                # Fallback: If my side is empty, help teammate!
+                # If cleared our side, help the teammate
                 if not my_food:
                     my_food = food_list
                     
                 features['successor_score'] = -len(my_food)
                 
-                # Food Clustering on filtered food
+                # Cluster food to avoid eating isolated dots first
                 if len(my_food) > 0:
                     k = min(len(my_food), 3)
                     closest_k = sorted(my_food, key=lambda f: self.get_maze_distance(my_pos, f))[:k]
@@ -317,7 +313,7 @@ class SmartAgent(CaptureAgent):
                 food_list = self.get_food(successor).as_list()
                 features['successor_score'] = -len(food_list) 
                 
-                # Food Clustering: Prefer groups of food
+                # Prefer clusters of food
                 if len(food_list) > 0:
                     k = min(len(food_list), 3)
                     closest_k = sorted(food_list, key=lambda f: self.get_maze_distance(my_pos, f))[:k]
@@ -330,12 +326,11 @@ class SmartAgent(CaptureAgent):
                     if dist_to_food < 9000:
                         features['distance_to_food'] = dist_to_food
             
-            # --- SHARED ATTACK LOGIC (Capsules / Ghosts) ---
-            # 1. Did we eat a capsule?
+            # Shared Logic: Eating capsules and avoiding ghosts
             if len(self.get_capsules(successor)) < len(current_capsules):
                 features['eat_capsule'] = 1
             
-            # 2. Pathfinding with Obstacles (Ghosts)
+            # Identify threats
             obstacles = active_ghosts_pos.copy()
             capsules = self.get_capsules(successor)
             
@@ -348,12 +343,11 @@ class SmartAgent(CaptureAgent):
             if len(active_ghosts_pos) > 0:
                 dist_to_ghost = min([self.get_maze_distance(my_pos, p) for p in active_ghosts_pos])
 
-            # 3. BERSERKER MODE: If capsule is closer than ghost, ignore danger
+            # If we can reach a capsule before a ghost reaches us, go for it
             if dist_to_capsule < dist_to_ghost:
-                # Go for the capsule, ignore danger!
                 features['distance_to_capsule'] = dist_to_capsule
             else:
-                # Normal Fear Mode
+                # Otherwise, play it safe
                 if dist_to_capsule < 9000: 
                     features['distance_to_capsule'] = dist_to_capsule
                 
@@ -362,7 +356,6 @@ class SmartAgent(CaptureAgent):
                 elif dist_to_ghost <= 2:
                     features['danger'] = 0.5
 
-        # --- RETREAT / ULTRA_RETREAT MODE ---
         elif self.mode == 'RETREAT' or self.mode == 'ULTRA_RETREAT':
             dist_to_home = self.get_safe_bfs_distance(successor, my_pos, [self.start], active_ghosts_pos)
             
@@ -370,19 +363,20 @@ class SmartAgent(CaptureAgent):
                 features['distance_to_home'] = dist_to_home
             else:
                 features['distance_to_home'] = self.get_maze_distance(my_pos, self.start)
-                features['danger'] = 1 # Panic if path blocked
-
+                features['danger'] = 1 # Path is blocked, panic!
+            
+            # Avoid ghosts on the way home
             if len(active_ghosts_pos) > 0:
                 min_dist = min([self.get_maze_distance(my_pos, p) for p in active_ghosts_pos])
                 if min_dist <= 1: features['danger'] = 1
-
-            # Opportunistic Food Pickup (if safe)
+            
+            # Grab food on the way back if it's safe
             food_list = self.get_food(successor).as_list()
             if len(food_list) > 0:
-                # Find food that is closer to home than we are (on the way)
                 my_dist_home = self.get_maze_distance(my_pos, self.start)
                 safe_food = []
                 for f in food_list:
+                    # Only consider food that is 'forward' towards home
                     if self.get_maze_distance(f, self.start) < my_dist_home:
                         # Check safety: No ghost within 3 steps of this food
                         is_safe = True
@@ -395,7 +389,6 @@ class SmartAgent(CaptureAgent):
                     # Minimize distance to this safe food
                     features['distance_to_safe_food'] = min([self.get_maze_distance(my_pos, f) for f in safe_food])
 
-        # --- DEFEND MODE ---
         elif self.mode == 'DEFEND':
             features['on_defense'] = 1
             if my_state.is_pacman: features['on_defense'] = 0
@@ -406,7 +399,7 @@ class SmartAgent(CaptureAgent):
                 dists = [self.get_maze_distance(my_pos, p) for p in invaders_pos]
                 features['invader_distance'] = min(dists)
                 
-                # Protect capsules
+                # Defend the capsules
                 capsules_defending = self.get_capsules_you_are_defending(successor)
                 if capsules_defending:
                     min_inv_cap_dist = min([self.get_maze_distance(inv, cap) 
@@ -415,7 +408,7 @@ class SmartAgent(CaptureAgent):
                     if min_inv_cap_dist < 5:
                         features['emergency_capsule_guard'] = 1
             else:
-                # Patrol Chokepoints (Zoned)
+                # Patrol Chokepoints
                 target_points = self.my_patrol_points if hasattr(self, 'my_patrol_points') else self.patrol_points
                 if target_points:
                     min_patrol = min([self.get_maze_distance(my_pos, p) for p in target_points])
@@ -433,16 +426,16 @@ class SmartAgent(CaptureAgent):
         if self.mode == 'ATTACK':
             weights['successor_score'] = 200
             weights['distance_to_food'] = -2
-            weights['food_cluster_dist'] = -1    # Bonus for clustering
+            weights['food_cluster_dist'] = -1
             weights['distance_to_capsule'] = -20
-            weights['eat_capsule'] = 5000         # HUGE BONUS for eating capsule
+            weights['eat_capsule'] = 5000         # Big priority
             weights['danger'] = -1000
             weights['stop'] = -100
             weights['reverse'] = -2
 
         elif self.mode == 'RETREAT':
             weights['distance_to_home'] = -5
-            weights['distance_to_safe_food'] = -2 # Pickup food if on the way
+            weights['distance_to_safe_food'] = -2
             weights['danger'] = -1000
             weights['stop'] = -100
             weights['reverse'] = -2
@@ -453,14 +446,14 @@ class SmartAgent(CaptureAgent):
             weights['food_cluster_dist'] = -1
             weights['distance_to_capsule'] = -20
             weights['eat_capsule'] = 5000
-            weights['danger'] = -10 # IGNORE FEAR (mostly)
+            weights['danger'] = -10 # Ignore fear (mostly)
             weights['stop'] = -500
             weights['reverse'] = -10
 
         elif self.mode == 'ULTRA_RETREAT':
-            weights['distance_to_home'] = -50     # Run home FAST
-            weights['distance_to_safe_food'] = 0 # Still pickup if easy
-            weights['danger'] = -100               # IGNORE FEAR
+            weights['distance_to_home'] = -50
+            weights['distance_to_safe_food'] = 0
+            weights['danger'] = -100
             weights['stop'] = -500
             weights['reverse'] = -10
 
