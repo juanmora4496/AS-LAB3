@@ -206,7 +206,7 @@ class SmartAgent(CaptureAgent):
         # 3. Mode Selection
         # Smart Endgame: If we can secure a win by returning, do it.
         food_carried = game_state.get_agent_state(self.index).num_carrying
-        if (current_lead + food_carried) > 4 and food_carried > 0:
+        if (current_lead + food_carried) > 6 or food_carried > 0:
              self.mode = 'RETREAT'
         elif current_lead >= 6: 
             self.mode = 'DEFEND'
@@ -222,6 +222,17 @@ class SmartAgent(CaptureAgent):
                 self.mode = 'ATTACK'
         else:
             self.mode = 'DEFEND'
+
+        # 3.1 Ultra Attacking Mode 
+        if current_lead < 0 and game_state.data.timeleft < 200:
+            ghost_nearby = any([self.get_maze_distance(my_pos, self.get_most_likely_position(o)) < 5 for o in self.opponents])
+            
+            # Retain greed unless ghost is near
+            threshold = 5 if not ghost_nearby else 2 
+            if food_carried >= threshold:
+                self.mode = 'ULTRA_RETREAT'
+            else:
+                self.mode = 'ULTRA_ATTACK'
 
         # 4. Execution
         actions = game_state.get_legal_actions(self.index)
@@ -262,20 +273,64 @@ class SmartAgent(CaptureAgent):
             elif enemy_state.scared_timer <= 2: # Treat almost-recovered ghosts as dangerous
                 active_ghosts_pos.append(pos)
 
-        # --- ATTACK MODE ---
-        if self.mode == 'ATTACK':
-            food_list = self.get_food(successor).as_list()
-            features['successor_score'] = -len(food_list) 
+        # --- ATTACK / ULTRA_ATTACK MODE ---
+        if self.mode == 'ATTACK' or self.mode == 'ULTRA_ATTACK':
+            features['successor_score'] = 0 # Default
+
+            if self.mode == 'ULTRA_ATTACK':
+                # Coordination: Split map into Top/Bottom
+                food_list = self.get_food(successor).as_list()
+                
+                # Determine my role (Top or Bottom)
+                team_indices = self.get_team(game_state)
+                team_indices.sort() # Ensure consistent ordering
+                is_bottom = (self.index == team_indices[0])
+                
+                mid_y = game_state.data.layout.height // 2
+                
+                my_food = []
+                if is_bottom:
+                    my_food = [f for f in food_list if f[1] < mid_y]
+                else:
+                    my_food = [f for f in food_list if f[1] >= mid_y]
+                    
+                # Fallback: If my side is empty, help teammate!
+                if not my_food:
+                    my_food = food_list
+                    
+                features['successor_score'] = -len(my_food)
+                
+                # Food Clustering on filtered food
+                if len(my_food) > 0:
+                    k = min(len(my_food), 3)
+                    closest_k = sorted(my_food, key=lambda f: self.get_maze_distance(my_pos, f))[:k]
+                    avg_dist = sum([self.get_maze_distance(my_pos, f) for f in closest_k]) / k
+                    features['food_cluster_dist'] = avg_dist
+
+                # Safe Path to My Food
+                if len(my_food) > 0:
+                    dist_to_food = self.get_safe_bfs_distance(successor, my_pos, my_food, active_ghosts_pos)
+                    if dist_to_food < 9000:
+                        features['distance_to_food'] = dist_to_food
+
+            else: # Normal ATTACK
+                food_list = self.get_food(successor).as_list()
+                features['successor_score'] = -len(food_list) 
+                
+                # Food Clustering: Prefer groups of food
+                if len(food_list) > 0:
+                    k = min(len(food_list), 3)
+                    closest_k = sorted(food_list, key=lambda f: self.get_maze_distance(my_pos, f))[:k]
+                    avg_dist = sum([self.get_maze_distance(my_pos, f) for f in closest_k]) / k
+                    features['food_cluster_dist'] = avg_dist 
+                
+                # Safe Path to Food
+                if len(food_list) > 0:
+                    dist_to_food = self.get_safe_bfs_distance(successor, my_pos, food_list, active_ghosts_pos)
+                    if dist_to_food < 9000:
+                        features['distance_to_food'] = dist_to_food
             
-            # Food Clustering: Prefer groups of food
-            if len(food_list) > 0:
-                k = min(len(food_list), 3)
-                # Sort food by distance
-                closest_k = sorted(food_list, key=lambda f: self.get_maze_distance(my_pos, f))[:k]
-                # Calculate average distance to the closest k foods
-                avg_dist = sum([self.get_maze_distance(my_pos, f) for f in closest_k]) / k
-                features['food_cluster_dist'] = avg_dist 
-            
+            # --- SHARED ATTACK LOGIC (Capsules / Ghosts) ---
             # 1. Did we eat a capsule?
             if len(self.get_capsules(successor)) < len(current_capsules):
                 features['eat_capsule'] = 1
@@ -307,14 +362,8 @@ class SmartAgent(CaptureAgent):
                 elif dist_to_ghost <= 2:
                     features['danger'] = 0.5
 
-            # 4. Safe Path to Food
-            if len(food_list) > 0:
-                dist_to_food = self.get_safe_bfs_distance(successor, my_pos, food_list, obstacles)
-                if dist_to_food < 9000:
-                    features['distance_to_food'] = dist_to_food
-
-        # --- RETREAT MODE ---
-        elif self.mode == 'RETREAT':
+        # --- RETREAT / ULTRA_RETREAT MODE ---
+        elif self.mode == 'RETREAT' or self.mode == 'ULTRA_RETREAT':
             dist_to_home = self.get_safe_bfs_distance(successor, my_pos, [self.start], active_ghosts_pos)
             
             if dist_to_home < 9000:
@@ -397,6 +446,23 @@ class SmartAgent(CaptureAgent):
             weights['danger'] = -1000
             weights['stop'] = -100
             weights['reverse'] = -2
+
+        elif self.mode == 'ULTRA_ATTACK':
+            weights['successor_score'] = 500
+            weights['distance_to_food'] = -5
+            weights['food_cluster_dist'] = -1
+            weights['distance_to_capsule'] = -20
+            weights['eat_capsule'] = 5000
+            weights['danger'] = -10 # IGNORE FEAR (mostly)
+            weights['stop'] = -500
+            weights['reverse'] = -10
+
+        elif self.mode == 'ULTRA_RETREAT':
+            weights['distance_to_home'] = -50     # Run home FAST
+            weights['distance_to_safe_food'] = 0 # Still pickup if easy
+            weights['danger'] = -100               # IGNORE FEAR
+            weights['stop'] = -500
+            weights['reverse'] = -10
 
         elif self.mode == 'DEFEND':
             weights['num_invaders'] = -1000
