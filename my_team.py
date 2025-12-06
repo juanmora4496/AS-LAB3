@@ -206,7 +206,7 @@ class SmartAgent(CaptureAgent):
         # 3. Mode Selection
         # Smart Endgame: If we can secure a win by returning, do it.
         food_carried = game_state.get_agent_state(self.index).num_carrying
-        if (current_lead + food_carried) > 6 or food_carried > 0:
+        if (current_lead + food_carried) > 7 or food_carried > 0:
              self.mode = 'RETREAT'
         elif current_lead >= 6: 
             self.mode = 'DEFEND'
